@@ -70,4 +70,11 @@ class MedicationServiceTest {
                 .atZone(ZoneId.systemDefault()).toLocalDate());
         verify(medicationRepository).saveAll(List.of(medication));
     }
+
+    @Test
+    void normalizesMultipleDailyTimesAndRejectsDuplicateTimes() {
+        assertEquals(List.of("08:00", "20:00"), MedicationService.parseScheduleTimes("08:00, 8:00 PM"));
+        assertThrows(ResponseStatusException.class,
+                () -> MedicationService.parseScheduleTimes("08:00, 8:00 AM"));
+    }
 }

@@ -30,20 +30,9 @@ const fallbackDashboard = {
   completionRate: 86,
 };
 
-const fallbackMedications = [
-  { id: 1, name: 'Aspirin', dosage: '81mg', scheduleTime: '08:00 AM', frequency: 'Daily', status: 'PENDING', notes: 'After breakfast' },
-  { id: 2, name: 'Vitamin D', dosage: '1000 IU', scheduleTime: '06:30 PM', frequency: 'Daily', status: 'TAKEN', notes: 'With dinner' },
-  { id: 3, name: 'Omega-3', dosage: '1 capsule', scheduleTime: '07:00 PM', frequency: 'Twice a week', status: 'PENDING', notes: 'Take with food' },
-];
-
 const fallbackAppointments = [
   { id: 1, title: 'Cardiology Review', doctorName: 'Dr. Patel', appointmentTime: '2026-11-22T10:30:00Z', status: 'SCHEDULED', location: 'City Clinic, Room 2' },
   { id: 2, title: 'Care Plan Check-In', doctorName: 'Nurse Linda', appointmentTime: '2026-11-28T13:00:00Z', status: 'SCHEDULED', location: 'Home Care Team' },
-];
-
-const fallbackRecords = [
-  { id: 1, title: 'Annual Checkup', documentType: 'Prescription', summary: 'Routine blood pressure and vitamin report.', extractedText: 'Medication: Aspirin 81mg daily.' },
-  { id: 2, title: 'Recovery Notes', documentType: 'Report', summary: 'Mobility assessment after PT sessions.', extractedText: 'Mobility improved; continue stretching routines.' },
 ];
 
 const chartData = [
@@ -61,6 +50,10 @@ function stripBearer(token) {
   return token.startsWith('Bearer ') ? token.slice(7) : token;
 }
 
+function getTimezoneHeader() {
+  return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+}
+
 function formatDateTime(value) {
   if (!value) return 'No date';
   try {
@@ -68,6 +61,12 @@ function formatDateTime(value) {
   } catch {
     return value;
   }
+}
+
+function formatDoseTime(value) {
+  const [hours, minutes] = String(value || '').split(':').map(Number);
+  if (!Number.isInteger(hours) || !Number.isInteger(minutes)) return value;
+  return new Date(2000, 0, 1, hours, minutes).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
 }
 
 function App() {
@@ -82,14 +81,142 @@ function AppLayout() {
   const [token, setToken] = useState(() => localStorage.getItem('eldercare-token'));
   const [user, setUser] = useState(null);
   const [dashboard, setDashboard] = useState(fallbackDashboard);
-  const [medications, setMedications] = useState(fallbackMedications);
+  const [medications, setMedications] = useState([]);
+  const [todayDoses, setTodayDoses] = useState([]);
   const [appointments, setAppointments] = useState(fallbackAppointments);
-  const [records, setRecords] = useState(fallbackRecords);
+  const [records, setRecords] = useState([]);
+  const [voiceEnabled, setVoiceEnabled] = useState(false);
+  const [voiceStatus, setVoiceStatus] = useState('Voice reminders are off.');
+  const [isListening, setIsListening] = useState(false);
+  const announcedReminders = useRef(new Set());
 
-  useEffect(() => {
-    if (!token) {
+  const saveDoseStatus = useCallback(async (dose, status) => {
+    try {
+      const response = await axios.patch(
+        `${API_BASE}/medications/${dose.medicationId}/doses/status`,
+        null,
+        {
+          params: { scheduledTime: dose.scheduledTime, status },
+          headers: {
+            Authorization: `Bearer ${stripBearer(token)}`,
+            'X-Timezone': getTimezoneHeader(),
+          },
+        },
+      );
+      setTodayDoses((current) => current.map((item) => item.id === response.data.id ? response.data : item));
+      setVoiceStatus(`${dose.medicationName} (${formatDoseTime(dose.scheduledTime)}) marked as taken.`);
+      return true;
+    } catch {
+      setVoiceStatus(`Could not save ${dose.medicationName}'s dose. It remains pending.`);
+      return false;
+    }
+  }, [token]);
+
+  const speakMessage = useCallback((message) => {
+    if (!('speechSynthesis' in window) || typeof SpeechSynthesisUtterance === 'undefined') {
+      setVoiceStatus('Spoken alerts are not supported in this browser.');
+      return false;
+    }
+    window.speechSynthesis.cancel();
+    window.speechSynthesis.speak(new SpeechSynthesisUtterance(message));
+    return true;
+  }, []);
+
+  const askForVoiceConfirmation = useCallback((dose) => {
+    const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!Recognition) {
+      setVoiceStatus('This browser cannot hear spoken replies. Use the Mark taken button to confirm.');
       return;
     }
+
+    const recognition = new Recognition();
+    recognition.lang = 'en-US';
+    recognition.continuous = false;
+    recognition.interimResults = false;
+    let receivedResult = false;
+    setIsListening(true);
+    setVoiceStatus(`Listening for confirmation for ${dose.medicationName}...`);
+
+    recognition.onresult = async (event) => {
+      receivedResult = true;
+      const transcript = event.results?.[0]?.[0]?.transcript?.trim().toLowerCase() || '';
+      const saysNotTaken = /\b(not|no|haven't|have not|didn't|did not|yet)\b/.test(transcript);
+      const confirmsTaken = !saysNotTaken && /\b(yes|yeah|yep|taken|took|done)\b/.test(transcript);
+      if (!confirmsTaken) {
+        setVoiceStatus(`No clear confirmation heard. ${dose.medicationName} remains pending.`);
+        speakMessage(`${dose.medicationName} remains pending. Use the Mark taken button when the dose is taken.`);
+        return;
+      }
+
+      const saved = await saveDoseStatus(dose, 'TAKEN');
+      speakMessage(saved
+        ? `Thank you. ${dose.medicationName} is marked as taken.`
+        : `I could not save the confirmation. ${dose.medicationName} remains pending.`);
+    };
+
+    recognition.onerror = () => {
+      setVoiceStatus(`Could not hear a confirmation. ${dose.medicationName} remains pending.`);
+    };
+    recognition.onend = () => {
+      setIsListening(false);
+      if (!receivedResult) setVoiceStatus(`No confirmation heard. ${dose.medicationName} remains pending.`);
+    };
+
+    try {
+      recognition.start();
+    } catch {
+      setIsListening(false);
+      setVoiceStatus(`Could not start voice recognition. ${dose.medicationName} remains pending.`);
+    }
+  }, [saveDoseStatus, speakMessage]);
+
+  useEffect(() => {
+    if (!voiceEnabled || todayDoses.length === 0) return undefined;
+    if (!('speechSynthesis' in window) || typeof SpeechSynthesisUtterance === 'undefined') return undefined;
+
+    const checkDueDoses = () => {
+      const now = new Date();
+      const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+      const dueDose = todayDoses.find((dose) => {
+        if (dose.status !== 'PENDING' || dose.doseDate !== today) return false;
+        const [hours, minutes] = String(dose.scheduledTime).split(':').map(Number);
+        if (!Number.isInteger(hours) || !Number.isInteger(minutes)) return false;
+        const scheduled = new Date(now);
+        scheduled.setHours(hours, minutes, 0, 0);
+        const minutesLate = (now.getTime() - scheduled.getTime()) / 60000;
+        const reminderKey = `${today}:${dose.medicationId}:${dose.scheduledTime}`;
+        return minutesLate >= 0 && minutesLate < 3 && !announcedReminders.current.has(reminderKey);
+      });
+
+      if (dueDose) {
+        announcedReminders.current.add(`${today}:${dueDose.medicationId}:${dueDose.scheduledTime}`);
+        setVoiceStatus(`Reminder for ${dueDose.medicationName}. Listening for confirmation...`);
+        window.speechSynthesis.cancel();
+        const utterance = new SpeechSynthesisUtterance(
+          `It is time to take ${dueDose.medicationName}, ${dueDose.dosage}. Say taken after you have taken it.`,
+        );
+        utterance.onend = () => askForVoiceConfirmation(dueDose);
+        window.speechSynthesis.speak(utterance);
+      }
+    };
+
+    checkDueDoses();
+    const intervalId = window.setInterval(checkDueDoses, 5000);
+    return () => window.clearInterval(intervalId);
+  }, [askForVoiceConfirmation, todayDoses, voiceEnabled]);
+
+  const refreshMedicationData = useCallback(async () => {
+    const headers = { Authorization: `Bearer ${stripBearer(token)}` };
+    const [medicationsResponse, dosesResponse] = await Promise.all([
+      axios.get(`${API_BASE}/medications`, { headers }),
+      axios.get(`${API_BASE}/medications/doses/today`, { headers: { ...headers, 'X-Timezone': getTimezoneHeader() } }),
+    ]);
+    setMedications(medicationsResponse.data);
+    setTodayDoses(dosesResponse.data);
+  }, [token]);
+
+  useEffect(() => {
+    if (!token) return;
 
     axios
       .get(`${API_BASE}/auth/me`, { headers: { Authorization: `Bearer ${stripBearer(token)}` } })
@@ -99,26 +226,32 @@ function AppLayout() {
           localStorage.removeItem('eldercare-token');
           setToken(null);
           setUser(null);
+          setMedications([]);
+          setTodayDoses([]);
+          setRecords([]);
         }
       });
 
     Promise.all([
       axios.get(`${API_BASE}/dashboard`, { headers: { Authorization: `Bearer ${stripBearer(token)}` } }).catch(() => ({ data: fallbackDashboard })),
-      axios.get(`${API_BASE}/medications`, { headers: { Authorization: `Bearer ${stripBearer(token)}` } }).catch(() => ({ data: fallbackMedications })),
+      axios.get(`${API_BASE}/medications`, { headers: { Authorization: `Bearer ${stripBearer(token)}` } }).catch(() => ({ data: [] })),
+      axios.get(`${API_BASE}/medications/doses/today`, { headers: { Authorization: `Bearer ${stripBearer(token)}`, 'X-Timezone': getTimezoneHeader() } }).catch(() => ({ data: [] })),
       axios.get(`${API_BASE}/appointments`, { headers: { Authorization: `Bearer ${stripBearer(token)}` } }).catch(() => ({ data: fallbackAppointments })),
-      axios.get(`${API_BASE}/records`, { headers: { Authorization: `Bearer ${stripBearer(token)}` } }).catch(() => ({ data: fallbackRecords })),
+      axios.get(`${API_BASE}/records`, { headers: { Authorization: `Bearer ${stripBearer(token)}` } }).catch(() => ({ data: [] })),
     ])
-      .then(([dashboardRes, medsRes, apptsRes, recordsRes]) => {
+      .then(([dashboardRes, medsRes, dosesRes, apptsRes, recordsRes]) => {
         setDashboard(dashboardRes.data);
         setMedications(medsRes.data);
+        setTodayDoses(dosesRes.data);
         setAppointments(apptsRes.data);
         setRecords(recordsRes.data);
       })
       .catch(() => {
         setDashboard(fallbackDashboard);
-        setMedications(fallbackMedications);
+        setMedications([]);
+        setTodayDoses([]);
         setAppointments(fallbackAppointments);
-        setRecords(fallbackRecords);
+        setRecords([]);
       });
   }, [token]);
 
@@ -142,6 +275,13 @@ function AppLayout() {
     localStorage.removeItem('eldercare-token');
     setToken(null);
     setUser(null);
+    setMedications([]);
+    setTodayDoses([]);
+    setRecords([]);
+    setVoiceEnabled(false);
+    setVoiceStatus('Voice reminders are off.');
+    setIsListening(false);
+    window.speechSynthesis?.cancel();
   };
 
   const protectedPage = (page) => token ? page : <Navigate to="/login" replace />;
@@ -150,21 +290,23 @@ function AppLayout() {
     <div className="min-h-screen bg-slate-50 text-slate-800">
       <header className="border-b border-slate-200 bg-white/85 backdrop-blur-sm">
         <div className="mx-auto flex max-w-7xl items-center justify-between px-6 py-4">
-          <Link to={token ? '/' : '/login'} className="flex items-center gap-3 text-lg font-semibold text-slate-900">
+          <Link to="/" className="flex items-center gap-3 text-lg font-semibold text-slate-900">
             <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-brand-100 text-brand-700">
               <HeartPulse className="h-5 w-5" />
             </div>
             ElderCare 360
           </Link>
-          {token && (
-            <nav className="hidden items-center gap-2 md:flex">
-              <NavLink className="nav-link" to="/">Home</NavLink>
+          <nav className="hidden items-center gap-2 md:flex">
+            <NavLink className="nav-link" to="/">Home</NavLink>
+            {token && (
+              <>
               <NavLink className="nav-link" to="/dashboard">Dashboard</NavLink>
               <NavLink className="nav-link" to="/medications">Medication</NavLink>
               <NavLink className="nav-link" to="/records">Medical Vault</NavLink>
               <NavLink className="nav-link" to="/appointments">Appointments</NavLink>
-            </nav>
-          )}
+              </>
+            )}
+          </nav>
           {token ? (
             <div className="flex items-center gap-3">
               <div className="hidden rounded-full bg-slate-100 px-3 py-2 text-sm font-medium text-slate-700 sm:block">
@@ -188,12 +330,25 @@ function AppLayout() {
       </header>
 
       <Routes>
-        <Route path="/" element={protectedPage(<LandingPage />)} />
+        <Route path="/" element={<LandingPage />} />
         <Route path="/login" element={token ? <Navigate to="/dashboard" replace /> : <AuthPage onLogin={handleLogin} onRegister={handleRegister} />} />
         <Route path="/register" element={token ? <Navigate to="/dashboard" replace /> : <AuthPage onLogin={handleLogin} onRegister={handleRegister} />} />
         <Route path="/dashboard" element={protectedPage(<DashboardPage user={user} dashboard={dashboard} records={records} />)} />
-        <Route path="/medications" element={protectedPage(<MedicationPage medications={medications} setMedications={setMedications} token={token} />)} />
-        <Route path="/records" element={protectedPage(<RecordsPage records={records} setRecords={setRecords} />)} />
+        <Route path="/medications" element={protectedPage(<MedicationPage
+          medications={medications}
+          todayDoses={todayDoses}
+          setMedications={setMedications}
+          token={token}
+          refreshMedicationData={refreshMedicationData}
+          saveDoseStatus={saveDoseStatus}
+          voiceEnabled={voiceEnabled}
+          setVoiceEnabled={setVoiceEnabled}
+          voiceStatus={voiceStatus}
+          setVoiceStatus={setVoiceStatus}
+          speakMessage={speakMessage}
+          isListening={isListening}
+        />)} />
+        <Route path="/records" element={protectedPage(<RecordsPage records={records} setRecords={setRecords} token={token} />)} />
         <Route path="/appointments" element={protectedPage(<AppointmentsPage appointments={appointments} setAppointments={setAppointments} />)} />
       </Routes>
     </div>
@@ -445,149 +600,101 @@ function DashboardPage({ user, dashboard, records }) {
   );
 }
 
-function MedicationPage({ medications, setMedications, token }) {
-  const [form, setForm] = useState({ name: '', dosage: '', scheduleTime: '', frequency: '', notes: '' });
-  const [voiceEnabled, setVoiceEnabled] = useState(false);
-  const [voiceStatus, setVoiceStatus] = useState('Voice reminders are off.');
-  const [isListening, setIsListening] = useState(false);
-  const [statusError, setStatusError] = useState('');
-  const announcedReminders = useRef(new Set());
-
-  const speakMessage = useCallback((message) => {
-    if (!('speechSynthesis' in window) || typeof SpeechSynthesisUtterance === 'undefined') {
-      setVoiceStatus('Spoken alerts are not supported in this browser.');
-      return;
-    }
-    window.speechSynthesis.cancel();
-    window.speechSynthesis.speak(new SpeechSynthesisUtterance(message));
-  }, []);
+function MedicationPage({
+  medications,
+  todayDoses,
+  setMedications,
+  token,
+  refreshMedicationData,
+  saveDoseStatus,
+  voiceEnabled,
+  setVoiceEnabled,
+  voiceStatus,
+  setVoiceStatus,
+  speakMessage,
+  isListening,
+}) {
+  const [form, setForm] = useState({ name: '', dosage: '', scheduleTimes: [''], frequency: 'Daily', notes: '' });
+  const [formError, setFormError] = useState('');
+  const [ocrStatus, setOcrStatus] = useState('');
+  const [ocrText, setOcrText] = useState('');
+  const [ocrMedications, setOcrMedications] = useState([]);
+  const [ocrBusy, setOcrBusy] = useState(false);
 
   const saveMedicationStatus = useCallback(async (medication, status) => {
-    setStatusError('');
-    if (token) {
-      try {
-        await axios.patch(
-          `${API_BASE}/medications/${medication.id}/status`,
-          null,
-          {
-            params: { status },
-            headers: { Authorization: `Bearer ${stripBearer(token)}` },
-          },
-        );
-      } catch {
-        setStatusError('Could not save this confirmation. The dose is still marked pending.');
-        setVoiceStatus(`${medication.name} confirmation could not be saved; the dose remains pending.`);
-        return false;
-      }
+    try {
+      await axios.patch(
+        `${API_BASE}/medications/${medication.id}/status`,
+        null,
+        {
+          params: { status },
+          headers: { Authorization: `Bearer ${stripBearer(token)}` },
+        },
+      );
+      setMedications((current) => current.map((item) => (
+        item.id === medication.id ? { ...item, status } : item
+      )));
+      return true;
+    } catch {
+      setFormError('Could not save this medication status. Please try again.');
+      return false;
     }
-
-    setMedications((current) => current.map((item) => (
-      item.id === medication.id ? { ...item, status } : item
-    )));
-    setVoiceStatus(`${medication.name} marked as taken.`);
-    return true;
   }, [setMedications, token]);
 
-  const askForVoiceConfirmation = useCallback((medication) => {
-    const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!Recognition) {
-      setVoiceStatus('Voice recognition is not supported in this browser. Use the Mark taken button to confirm.');
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    const scheduleTime = form.scheduleTimes.filter(Boolean).join(',');
+    setFormError('');
+    if (!scheduleTime) {
+      setFormError('Add at least one dose time.');
       return;
     }
-
-    const recognition = new Recognition();
-    recognition.lang = 'en-US';
-    recognition.continuous = false;
-    recognition.interimResults = false;
-    let receivedResult = false;
-    setIsListening(true);
-    setVoiceStatus(`Listening for confirmation for ${medication.name}...`);
-
-    recognition.onresult = async (event) => {
-      receivedResult = true;
-      const transcript = event.results?.[0]?.[0]?.transcript?.trim().toLowerCase() || '';
-      const saysNotTaken = /\b(not|no|haven't|have not|didn't|did not|yet)\b/.test(transcript);
-      const confirmsTaken = !saysNotTaken && /\b(yes|yeah|yep|taken|took|done)\b/.test(transcript);
-
-      if (confirmsTaken) {
-        const saved = await saveMedicationStatus(medication, 'TAKEN');
-        if (saved) {
-          speakMessage(`Thank you. ${medication.name} is marked as taken.`);
-        } else {
-          speakMessage(`I could not save the confirmation. ${medication.name} remains pending.`);
-        }
-      } else {
-        setVoiceStatus(`No clear confirmation heard. ${medication.name} remains pending.`);
-        speakMessage(`I did not hear a clear confirmation. ${medication.name} remains pending.`);
-      }
-    };
-
-    recognition.onerror = () => {
-      setVoiceStatus(`Could not hear a confirmation. ${medication.name} remains pending.`);
-    };
-    recognition.onend = () => {
-      setIsListening(false);
-      if (!receivedResult) {
-        setVoiceStatus(`No confirmation heard. ${medication.name} remains pending.`);
-      }
-    };
-
     try {
-      recognition.start();
-    } catch {
-      setIsListening(false);
-      setVoiceStatus(`Could not start voice recognition. ${medication.name} remains pending.`);
-    }
-  }, [saveMedicationStatus, speakMessage]);
-
-  useEffect(() => {
-    if (!voiceEnabled) return undefined;
-
-    const checkDueMedications = () => {
-      const now = new Date();
-      const hour = now.getHours() % 12 || 12;
-      const minute = String(now.getMinutes()).padStart(2, '0');
-      const currentTime = `${String(hour).padStart(2, '0')}:${minute}`;
-      const meridiem = now.getHours() >= 12 ? 'PM' : 'AM';
-      const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
-
-      const dueMedication = medications.find((medication) => {
-        const match = medication.scheduleTime?.trim().match(/^(\d{1,2}):(\d{2})\s*(AM|PM)?$/i);
-        if (!match) return false;
-        if (!/daily|every day/i.test(medication.frequency || '')) return false;
-        const scheduledTime = `${String(Number(match[1])).padStart(2, '0')}:${match[2]}`;
-        const scheduledMeridiem = match[3]?.toUpperCase();
-        const reminderKey = `${today}:${medication.id}`;
-        return medication.status === 'PENDING'
-          && scheduledTime === currentTime
-          && (!scheduledMeridiem || scheduledMeridiem === meridiem)
-          && !announcedReminders.current.has(reminderKey);
-      });
-
-      if (dueMedication) {
-        announcedReminders.current.add(`${today}:${dueMedication.id}`);
-        setVoiceStatus(`Reminder for ${dueMedication.name}. Listening for confirmation...`);
-        window.speechSynthesis?.cancel();
-        const utterance = new SpeechSynthesisUtterance(
-          `It is time to take ${dueMedication.name}, ${dueMedication.dosage}. Say taken after you have taken it.`,
-        );
-        utterance.onend = () => askForVoiceConfirmation(dueMedication);
-        window.speechSynthesis?.speak(utterance);
+      const response = await axios.post(
+        `${API_BASE}/medications`,
+        {
+          name: form.name,
+          dosage: form.dosage,
+          scheduleTime,
+          frequency: form.frequency,
+          notes: form.notes,
+        },
+        { headers: { Authorization: `Bearer ${stripBearer(token)}` } },
+      );
+      setMedications((current) => [response.data, ...current]);
+      setForm({ name: '', dosage: '', scheduleTimes: [''], frequency: 'Daily', notes: '' });
+      try {
+        await refreshMedicationData();
+      } catch {
+        setFormError('Medication was saved, but the schedule could not be refreshed. Reload the page to see it.');
       }
-    };
+    } catch (error) {
+      setFormError(error.response?.data?.message || 'Could not save the medication. Please check the details and try again.');
+    }
+  };
 
-    checkDueMedications();
-    const intervalId = window.setInterval(checkDueMedications, 15000);
-    return () => {
-      window.clearInterval(intervalId);
-      window.speechSynthesis?.cancel();
-    };
-  }, [askForVoiceConfirmation, medications, voiceEnabled]);
-
-  const handleSubmit = (e) => {
-    e.preventDefault();
-    setMedications((current) => [{ id: Date.now(), ...form, status: 'PENDING' }, ...current]);
-    setForm({ name: '', dosage: '', scheduleTime: '', frequency: '', notes: '' });
+  const handleOcrUpload = async (file) => {
+    if (!file) return;
+    setOcrBusy(true);
+    setOcrStatus('');
+    setOcrText('');
+    setOcrMedications([]);
+    const payload = new FormData();
+    payload.append('file', file);
+    try {
+      const response = await axios.post(`${API_BASE}/medications/ocr`, payload, {
+        headers: { Authorization: `Bearer ${stripBearer(token)}` },
+      });
+      setOcrText(response.data.text || '');
+      setOcrMedications(response.data.medications || []);
+      setOcrStatus(response.data.medications?.length
+        ? 'Check the detected details, then choose one to fill the form. Nothing is saved automatically.'
+        : 'No medication details were detected. Enter them manually after reviewing the text.');
+    } catch (error) {
+      setOcrStatus(error.response?.data?.detail || error.response?.data?.message || 'Could not read the file. Check the local OCR service and try again.');
+    } finally {
+      setOcrBusy(false);
+    }
   };
 
   return (
@@ -596,13 +703,80 @@ function MedicationPage({ medications, setMedications, token }) {
         <div className="card">
           <h2 className="text-2xl font-bold text-slate-900">Add medication</h2>
           <form className="mt-6 space-y-4" onSubmit={handleSubmit}>
-            <input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="Medication name" className="w-full rounded-xl border border-slate-200 bg-slate-50 p-3" />
-            <input value={form.dosage} onChange={(e) => setForm({ ...form, dosage: e.target.value })} placeholder="Dosage" className="w-full rounded-xl border border-slate-200 bg-slate-50 p-3" />
-            <input value={form.scheduleTime} onChange={(e) => setForm({ ...form, scheduleTime: e.target.value })} placeholder="08:00 AM" className="w-full rounded-xl border border-slate-200 bg-slate-50 p-3" />
-            <input value={form.frequency} onChange={(e) => setForm({ ...form, frequency: e.target.value })} placeholder="Daily / Twice a week" className="w-full rounded-xl border border-slate-200 bg-slate-50 p-3" />
+            <label className="block text-sm font-medium text-slate-700">
+              Prescription or medicine-label photo (optional)
+              <input
+                type="file"
+                accept="image/*,.pdf"
+                capture="environment"
+                onChange={(e) => handleOcrUpload(e.target.files?.[0])}
+                className="mt-2 w-full rounded-xl border border-dashed border-slate-300 bg-slate-50 p-3"
+              />
+            </label>
+            {ocrBusy && <p className="text-sm text-slate-600">Reading file locally…</p>}
+            {ocrStatus && <p className="text-sm text-slate-600" aria-live="polite">{ocrStatus}</p>}
+            {ocrMedications.map((detected, index) => (
+              <button
+                key={`${detected.name}-${index}`}
+                type="button"
+                onClick={() => setForm((current) => ({ ...current, name: detected.name, dosage: detected.dosage }))}
+                className="block w-full rounded-xl border border-brand-200 bg-brand-50 p-3 text-left text-sm text-brand-800"
+              >
+                Use detected details: {detected.name} · {detected.dosage}
+              </button>
+            ))}
+            {ocrText && (
+              <details className="rounded-xl border border-slate-200 p-3">
+                <summary className="cursor-pointer text-sm font-semibold text-slate-700">Review extracted text</summary>
+                <pre className="mt-3 max-h-40 overflow-auto whitespace-pre-wrap text-xs text-slate-600">{ocrText}</pre>
+              </details>
+            )}
+            <input required value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="Medication name" className="w-full rounded-xl border border-slate-200 bg-slate-50 p-3" />
+            <input required value={form.dosage} onChange={(e) => setForm({ ...form, dosage: e.target.value })} placeholder="Dosage" className="w-full rounded-xl border border-slate-200 bg-slate-50 p-3" />
+            <div className="space-y-2">
+              <label className="block text-sm font-medium text-slate-700">Daily dose times</label>
+              {form.scheduleTimes.map((time, index) => (
+                <div key={index} className="flex gap-2">
+                  <input
+                    required
+                    type="time"
+                    value={time}
+                    onChange={(e) => setForm((current) => ({
+                      ...current,
+                      scheduleTimes: current.scheduleTimes.map((item, itemIndex) => itemIndex === index ? e.target.value : item),
+                    }))}
+                    className="w-full rounded-xl border border-slate-200 bg-slate-50 p-3"
+                  />
+                  {form.scheduleTimes.length > 1 && (
+                    <button
+                      type="button"
+                      onClick={() => setForm((current) => ({
+                        ...current,
+                        scheduleTimes: current.scheduleTimes.filter((_, itemIndex) => itemIndex !== index),
+                      }))}
+                      className="rounded-xl border border-slate-200 px-3 text-slate-600"
+                      aria-label={`Remove dose time ${index + 1}`}
+                    >
+                      Remove
+                    </button>
+                  )}
+                </div>
+              ))}
+              {form.scheduleTimes.length < 5 && (
+                <button
+                  type="button"
+                  onClick={() => setForm((current) => ({ ...current, scheduleTimes: [...current.scheduleTimes, ''] }))}
+                  className="text-sm font-semibold text-brand-700"
+                >
+                  Add another daily time
+                </button>
+              )}
+            </div>
+            <input required value={form.frequency} onChange={(e) => setForm({ ...form, frequency: e.target.value })} placeholder="Daily / Twice a week" className="w-full rounded-xl border border-slate-200 bg-slate-50 p-3" />
             <textarea value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} placeholder="Notes for caregiver or elder" className="w-full rounded-xl border border-slate-200 bg-slate-50 p-3" rows="4" />
             <button type="submit" className="w-full rounded-xl bg-brand-600 px-4 py-3 font-semibold text-white">Save medication</button>
           </form>
+          {formError && <p role="alert" className="mt-3 text-sm font-medium text-red-600">{formError}</p>}
         </div>
 
         <div className="card">
@@ -610,26 +784,40 @@ function MedicationPage({ medications, setMedications, token }) {
             <div>
               <h2 className="text-2xl font-bold text-slate-900">Medication schedule</h2>
               <p className="mt-2 text-sm text-slate-600" aria-live="polite">{voiceStatus}</p>
+              <p className="mt-1 text-xs text-slate-500">Reminders work while this website is open. Spoken replies require browser microphone support; manual confirmation is always available.</p>
             </div>
-            <button
-              type="button"
-              onClick={() => {
-                if (!('speechSynthesis' in window) || typeof SpeechSynthesisUtterance === 'undefined') {
-                  setVoiceStatus('Spoken alerts are not supported in this browser.');
-                  return;
-                }
-                setVoiceEnabled((enabled) => !enabled);
-                setVoiceStatus(voiceEnabled ? 'Voice reminders are off.' : 'Voice reminders are on for daily medications on this page.');
-                if (voiceEnabled) window.speechSynthesis.cancel();
-              }}
-              className="inline-flex items-center gap-2 rounded-xl border border-brand-200 bg-brand-50 px-4 py-2 text-sm font-semibold text-brand-700"
-              aria-pressed={voiceEnabled}
-            >
-              <BellRing className="h-4 w-4" />
-              {voiceEnabled ? 'Turn off voice reminders' : 'Enable voice reminders'}
-            </button>
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  if (!voiceEnabled && (!('speechSynthesis' in window) || typeof SpeechSynthesisUtterance === 'undefined')) {
+                    setVoiceStatus('Spoken alerts are not supported in this browser.');
+                    return;
+                  }
+                  const enabled = !voiceEnabled;
+                  setVoiceEnabled(enabled);
+                  setVoiceStatus(enabled ? 'Voice reminders are on while the website remains open.' : 'Voice reminders are off.');
+                  if (!enabled) window.speechSynthesis?.cancel();
+                }}
+                className="inline-flex items-center gap-2 rounded-xl border border-brand-200 bg-brand-50 px-4 py-2 text-sm font-semibold text-brand-700"
+                aria-pressed={voiceEnabled}
+              >
+                <BellRing className="h-4 w-4" />
+                {voiceEnabled ? 'Turn off reminders' : 'Enable voice reminders'}
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  if (speakMessage('This is a test of your ElderCare medication voice alert.')) {
+                    setVoiceStatus('Test voice alert sent. If you cannot hear it, check this device’s volume and browser audio settings.');
+                  }
+                }}
+                className="rounded-xl border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-700"
+              >
+                Test voice
+              </button>
+            </div>
           </div>
-          {statusError && <p role="alert" className="mt-3 text-sm font-medium text-red-600">{statusError}</p>}
           {isListening && <p className="mt-3 inline-flex items-center gap-2 text-sm font-medium text-brand-700"><Mic className="h-4 w-4" />Listening for “taken”</p>}
           <div className="mt-6 space-y-4">
             {medications.map((medication) => (
@@ -637,15 +825,36 @@ function MedicationPage({ medications, setMedications, token }) {
                 <div className="flex items-start justify-between gap-4">
                   <div>
                     <div className="text-lg font-semibold text-slate-900">{medication.name}</div>
-                    <div className="mt-1 text-sm text-slate-500">{medication.dosage} · {medication.scheduleTime}</div>
+                    <div className="mt-1 text-sm text-slate-500">{medication.dosage} · {String(medication.scheduleTime || '').split(',').map(formatDoseTime).join(', ')}</div>
                   </div>
-                  <span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${medication.status === 'TAKEN' ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}`}>
-                    {medication.status}
-                  </span>
                 </div>
                 <div className="mt-3 text-sm text-slate-600">{medication.frequency}</div>
                 {medication.notes && <div className="mt-2 text-sm text-slate-500">{medication.notes}</div>}
-                {medication.status !== 'TAKEN' && (
+                {todayDoses.filter((dose) => dose.medicationId === medication.id).map((dose) => (
+                  <div key={dose.id} className="mt-3 flex flex-wrap items-center justify-between gap-3 rounded-xl bg-white p-3">
+                    <div className="text-sm font-medium text-slate-700">{formatDoseTime(dose.scheduledTime)} dose</div>
+                    <div className="flex items-center gap-3">
+                      <span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${dose.status === 'TAKEN' ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}`}>
+                        {dose.status}
+                      </span>
+                      {dose.status !== 'TAKEN' && (
+                        <button
+                          type="button"
+                          onClick={() => saveDoseStatus(dose, 'TAKEN')}
+                          className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-emerald-700"
+                        >
+                          Mark taken
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                ))}
+                {todayDoses.every((dose) => dose.medicationId !== medication.id) && (
+                  <div className="mt-3 flex items-center justify-between">
+                    <span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${medication.status === 'TAKEN' ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}`}>
+                      {medication.status}
+                    </span>
+                    {medication.status !== 'TAKEN' && (
                   <button
                     type="button"
                     onClick={() => saveMedicationStatus(medication, 'TAKEN')}
@@ -653,9 +862,12 @@ function MedicationPage({ medications, setMedications, token }) {
                   >
                     Mark taken
                   </button>
+                    )}
+                  </div>
                 )}
               </div>
             ))}
+            {medications.length === 0 && <p className="rounded-xl bg-slate-50 p-4 text-sm text-slate-600">No medications saved yet.</p>}
           </div>
         </div>
       </div>
@@ -663,23 +875,61 @@ function MedicationPage({ medications, setMedications, token }) {
   );
 }
 
-function RecordsPage({ records, setRecords }) {
+function RecordsPage({ records, setRecords, token }) {
   const [form, setForm] = useState({ title: '', documentType: 'Prescription', summary: '' });
   const [selectedFile, setSelectedFile] = useState(null);
+  const [formError, setFormError] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [downloadError, setDownloadError] = useState('');
 
-  const handleSubmit = (e) => {
+  const handleSubmit = async (e) => {
     e.preventDefault();
-    const entry = {
-      id: Date.now(),
-      title: form.title,
-      documentType: form.documentType,
-      summary: form.summary,
-      extractedText: selectedFile ? `Uploaded file: ${selectedFile.name}` : 'OCR-ready placeholder extracted from the document.',
-      fileName: selectedFile ? selectedFile.name : 'document.pdf',
-    };
-    setRecords((current) => [entry, ...current]);
-    setForm({ title: '', documentType: 'Prescription', summary: '' });
-    setSelectedFile(null);
+    const formElement = e.currentTarget;
+    if (!selectedFile) {
+      setFormError('Choose a file before storing the record.');
+      return;
+    }
+
+    setBusy(true);
+    setFormError('');
+    const payload = new FormData();
+    payload.append('title', form.title);
+    payload.append('documentType', form.documentType);
+    payload.append('summary', form.summary);
+    payload.append('file', selectedFile);
+    try {
+      const response = await axios.post(`${API_BASE}/records`, payload, {
+        headers: { Authorization: `Bearer ${stripBearer(token)}` },
+      });
+      setRecords((current) => [response.data, ...current]);
+      setForm({ title: '', documentType: 'Prescription', summary: '' });
+      setSelectedFile(null);
+      formElement.reset();
+    } catch (error) {
+      setFormError(error.response?.data?.message || error.response?.data?.detail || 'Could not store the file. Check its type and size, then try again.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const downloadRecord = async (record) => {
+    setDownloadError('');
+    try {
+      const response = await axios.get(`${API_BASE}/records/${record.id}/file`, {
+        responseType: 'blob',
+        headers: { Authorization: `Bearer ${stripBearer(token)}` },
+      });
+      const url = URL.createObjectURL(response.data);
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = record.fileName || 'medical-record';
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch {
+      setDownloadError(`Could not download ${record.title}.`);
+    }
   };
 
   return (
@@ -688,20 +938,23 @@ function RecordsPage({ records, setRecords }) {
         <div className="card">
           <h2 className="text-2xl font-bold text-slate-900">Upload medical record</h2>
           <form className="mt-6 space-y-4" onSubmit={handleSubmit}>
-            <input value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} placeholder="Record title" className="w-full rounded-xl border border-slate-200 bg-slate-50 p-3" />
+            <input required value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} placeholder="Record title" className="w-full rounded-xl border border-slate-200 bg-slate-50 p-3" />
             <select value={form.documentType} onChange={(e) => setForm({ ...form, documentType: e.target.value })} className="w-full rounded-xl border border-slate-200 bg-slate-50 p-3">
               <option value="Prescription">Prescription</option>
               <option value="Report">Report</option>
               <option value="Lab">Lab result</option>
             </select>
             <textarea value={form.summary} onChange={(e) => setForm({ ...form, summary: e.target.value })} placeholder="Summary and clinician notes" rows="4" className="w-full rounded-xl border border-slate-200 bg-slate-50 p-3" />
-            <input type="file" onChange={(e) => setSelectedFile(e.target.files[0])} className="w-full rounded-xl border border-dashed border-slate-300 bg-slate-50 p-3" />
-            <button type="submit" className="w-full rounded-xl bg-brand-600 px-4 py-3 font-semibold text-white">Store record</button>
+            <input required type="file" accept=".pdf,.png,.jpg,.jpeg,.webp,.txt" onChange={(e) => setSelectedFile(e.target.files?.[0] || null)} className="w-full rounded-xl border border-dashed border-slate-300 bg-slate-50 p-3" />
+            <p className="text-xs text-slate-500">PDF, PNG, JPG, WEBP, or TXT; maximum 10 MB. Files are stored privately in your account.</p>
+            <button disabled={busy} type="submit" className="w-full rounded-xl bg-brand-600 px-4 py-3 font-semibold text-white disabled:opacity-60">{busy ? 'Storing…' : 'Store record'}</button>
           </form>
+          {formError && <p role="alert" className="mt-3 text-sm font-medium text-red-600">{formError}</p>}
         </div>
 
         <div className="card">
           <h2 className="text-2xl font-bold text-slate-900">Medical vault</h2>
+          {downloadError && <p role="alert" className="mt-3 text-sm font-medium text-red-600">{downloadError}</p>}
           <div className="mt-6 space-y-4">
             {records.map((record) => (
               <div key={record.id} className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
@@ -710,9 +963,22 @@ function RecordsPage({ records, setRecords }) {
                   <span className="rounded-full bg-brand-100 px-2.5 py-1 text-xs font-semibold text-brand-700">{record.documentType}</span>
                 </div>
                 <div className="mt-2 text-sm text-slate-600">{record.summary}</div>
-                <div className="mt-3 rounded-xl bg-white p-3 text-sm text-slate-500">{record.extractedText}</div>
+                {record.extractedText && <div className="mt-3 rounded-xl bg-white p-3 text-sm text-slate-500">{record.extractedText}</div>}
+                <div className="mt-3 flex items-center justify-between gap-3">
+                  <span className="truncate text-sm text-slate-500">{record.fileName}</span>
+                  {record.fileName && (
+                    <button
+                      type="button"
+                      onClick={() => downloadRecord(record)}
+                      className="shrink-0 rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-700"
+                    >
+                      Download file
+                    </button>
+                  )}
+                </div>
               </div>
             ))}
+            {records.length === 0 && <p className="rounded-xl bg-slate-50 p-4 text-sm text-slate-600">No medical records stored yet.</p>}
           </div>
         </div>
       </div>

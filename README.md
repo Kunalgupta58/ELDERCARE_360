@@ -1,13 +1,13 @@
 # ELDERCARE 360
 
 A working MVP for the ElderCare 360 platform with a Java Spring Boot backend, Vite React frontend, and local OCR microservice.
-All application pages require authentication; new users can create an account from `/register`.
+The landing page is public. Medication, records, appointments, and dashboard features require an account; new users can register at `/register`.
 
 ## Features
 - Elderly/family/caregiver registration and login with JWT security
-- Medication dashboard with spoken scheduled reminders and optional spoken dose confirmation
-- Medical record vault with local file storage
-- OCR integration endpoint for prescription processing
+- Medication dashboard with independently tracked daily doses, browser voice reminders, and optional spoken confirmation
+- Private medical-record uploads and owner-authorized downloads
+- Local OCR review drafts from prescription or medicine-label photos/PDFs; detected values are never saved automatically
 - Appointment scheduler
 - Responsive UX for elderly care coordination
 
@@ -28,11 +28,14 @@ SPRING_PROFILES_ACTIVE=postgres mvn spring-boot:run
 
 ### 2. Start OCR service
 
+The OCR service needs the Tesseract executable in addition to its Python packages. The included Dockerfile installs it; for a local install, install `tesseract-ocr` through the operating system package manager first.
+
 ```bash
 cd ocr-service
 python3 -m venv .venv
 . .venv/bin/activate
 pip install -r requirements.txt
+python -m unittest test_main.py
 uvicorn main:app --host 0.0.0.0 --port 8001
 ```
 
@@ -52,7 +55,9 @@ During local development, Vite forwards `/api` requests to the backend. For a se
 - Password: Password123
 
 ## Notes
-- The default backend profile uses H2 for local development.
+- The default backend profile uses a file-backed H2 database at `${user.home}/eldercare360`; accounts and records survive backend restarts.
 - The production profile uses PostgreSQL when `SPRING_PROFILES_ACTIVE=postgres` is enabled.
-- The OCR microservice attempts local OCR processing; if a Tesseract binary is not installed in the current environment, it falls back to structured text extraction without inventing medical details.
-- Voice reminders use the browser's speech synthesis and speech recognition APIs. Enable them from the Medication page; keep that page open, and allow microphone access for spoken confirmation. Browser support is required. Daily medication statuses reset to pending the next calendar day when records are loaded; other frequencies remain manual because their weekdays are not configured. A dose remains pending unless a clear voice or button confirmation is saved.
+- The OCR service reports an explicit error when Tesseract is unavailable. OCR results are editable form suggestions only and require user review before saving.
+- Medical files are stored under `${user.home}/eldercare-files` by default, with private generated storage names and downloads restricted to the owning account. The upload limit is 10 MB.
+- Voice reminders use browser speech synthesis while the authenticated website is open. The Medication page includes a test-voice button. Spoken replies require a browser with speech recognition and microphone permission; manual dose confirmation remains available.
+- Daily dose times use the user's local browser time and can be added independently (for example, morning and evening). Each scheduled time has its own saved confirmation. Frequencies other than daily are tracked manually because weekdays are not configured.
