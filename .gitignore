@@ -1,0 +1,16 @@
+# Java
+backend/target/
+backend/.mvn/
+backend/*.log
+
+# Node
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# Python
+ocr-service/.venv/
+ocr-service/__pycache__/
+
+# OS
+.DS_Store

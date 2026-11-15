@@ -1,0 +1,24 @@
+version: '3.9'
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: eldercare-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: eldercare360
+      POSTGRES_USER: eldercare
+      POSTGRES_PASSWORD: eldercare
+    ports:
+      - '5432:5432'
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  ocr-service:
+    build: ./ocr-service
+    container_name: eldercare-ocr
+    restart: unless-stopped
+    ports:
+      - '8001:8001'
+
+volumes:
+  pgdata:
