@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { BrowserRouter, Link, NavLink, Route, Routes, useNavigate } from 'react-router-dom';
+import { BrowserRouter, Link, Navigate, NavLink, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
 import {
   Activity,
   ArrowRight,
@@ -19,12 +19,7 @@ import {
 import { Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 import axios from 'axios';
 
-const API_BASE = 'http://localhost:8080/api';
-const fallbackUser = {
-  fullName: 'Eleanor Brooks',
-  email: 'elder@example.com',
-  role: 'ELDERLY',
-};
+const API_BASE = import.meta.env.VITE_API_BASE_URL || '/api';
 
 const fallbackDashboard = {
   medicationCount: 4,
@@ -99,7 +94,13 @@ function AppLayout() {
     axios
       .get(`${API_BASE}/auth/me`, { headers: { Authorization: `Bearer ${stripBearer(token)}` } })
       .then((response) => setUser(response.data))
-      .catch(() => setUser(fallbackUser));
+      .catch((error) => {
+        if (error.response?.status === 401 || error.response?.status === 403) {
+          localStorage.removeItem('eldercare-token');
+          setToken(null);
+          setUser(null);
+        }
+      });
 
     Promise.all([
       axios.get(`${API_BASE}/dashboard`, { headers: { Authorization: `Bearer ${stripBearer(token)}` } }).catch(() => ({ data: fallbackDashboard })),
@@ -122,33 +123,19 @@ function AppLayout() {
   }, [token]);
 
   const handleLogin = async (payload) => {
-    try {
-      const response = await axios.post(`${API_BASE}/auth/login`, payload);
-      const jwt = response.data.token;
-      localStorage.setItem('eldercare-token', jwt);
-      setToken(jwt);
-      return true;
-    } catch {
-      const demoToken = 'demo-token';
-      localStorage.setItem('eldercare-token', demoToken);
-      setToken(demoToken);
-      setUser(fallbackUser);
-      return true;
-    }
+    const response = await axios.post(`${API_BASE}/auth/login`, payload);
+    const { token: jwt, ...userDetails } = response.data;
+    localStorage.setItem('eldercare-token', jwt);
+    setUser(userDetails);
+    setToken(jwt);
   };
 
   const handleRegister = async (payload) => {
-    try {
-      const response = await axios.post(`${API_BASE}/auth/register`, payload);
-      localStorage.setItem('eldercare-token', response.data.token);
-      setToken(response.data.token);
-      return true;
-    } catch {
-      localStorage.setItem('eldercare-token', 'demo-token');
-      setToken('demo-token');
-      setUser(fallbackUser);
-      return true;
-    }
+    const response = await axios.post(`${API_BASE}/auth/register`, payload);
+    const { token: jwt, ...userDetails } = response.data;
+    localStorage.setItem('eldercare-token', jwt);
+    setUser(userDetails);
+    setToken(jwt);
   };
 
   const handleLogout = () => {
@@ -157,27 +144,31 @@ function AppLayout() {
     setUser(null);
   };
 
+  const protectedPage = (page) => token ? page : <Navigate to="/login" replace />;
+
   return (
     <div className="min-h-screen bg-slate-50 text-slate-800">
       <header className="border-b border-slate-200 bg-white/85 backdrop-blur-sm">
         <div className="mx-auto flex max-w-7xl items-center justify-between px-6 py-4">
-          <Link to="/" className="flex items-center gap-3 text-lg font-semibold text-slate-900">
+          <Link to={token ? '/' : '/login'} className="flex items-center gap-3 text-lg font-semibold text-slate-900">
             <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-brand-100 text-brand-700">
               <HeartPulse className="h-5 w-5" />
             </div>
             ElderCare 360
           </Link>
-          <nav className="hidden items-center gap-2 md:flex">
-            <NavLink className="nav-link" to="/">Home</NavLink>
-            <NavLink className="nav-link" to="/dashboard">Dashboard</NavLink>
-            <NavLink className="nav-link" to="/medications">Medication</NavLink>
-            <NavLink className="nav-link" to="/records">Medical Vault</NavLink>
-            <NavLink className="nav-link" to="/appointments">Appointments</NavLink>
-          </nav>
-          {user ? (
+          {token && (
+            <nav className="hidden items-center gap-2 md:flex">
+              <NavLink className="nav-link" to="/">Home</NavLink>
+              <NavLink className="nav-link" to="/dashboard">Dashboard</NavLink>
+              <NavLink className="nav-link" to="/medications">Medication</NavLink>
+              <NavLink className="nav-link" to="/records">Medical Vault</NavLink>
+              <NavLink className="nav-link" to="/appointments">Appointments</NavLink>
+            </nav>
+          )}
+          {token ? (
             <div className="flex items-center gap-3">
               <div className="hidden rounded-full bg-slate-100 px-3 py-2 text-sm font-medium text-slate-700 sm:block">
-                {user.fullName}
+                {user?.fullName || 'Your account'}
               </div>
               <button onClick={handleLogout} className="inline-flex items-center gap-2 rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-medium text-slate-700 transition hover:border-slate-300 hover:bg-slate-50">
                 <LogOut className="h-4 w-4" />
@@ -185,21 +176,25 @@ function AppLayout() {
               </button>
             </div>
           ) : (
-            <Link to="/login" className="inline-flex items-center gap-2 rounded-full bg-brand-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-brand-700">
-              <Lock className="h-4 w-4" />
-              Login
-            </Link>
+            <div className="flex items-center gap-2">
+              <Link to="/login" className="rounded-full px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-100">Login</Link>
+              <Link to="/register" className="inline-flex items-center gap-2 rounded-full bg-brand-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-brand-700">
+                <Lock className="h-4 w-4" />
+                Register
+              </Link>
+            </div>
           )}
         </div>
       </header>
 
       <Routes>
-        <Route path="/" element={<LandingPage />} />
-        <Route path="/login" element={<AuthPage onLogin={handleLogin} onRegister={handleRegister} user={user} />} />
-        <Route path="/dashboard" element={<DashboardPage user={user} dashboard={dashboard} records={records} />} />
-        <Route path="/medications" element={<MedicationPage medications={medications} setMedications={setMedications} token={token} />} />
-        <Route path="/records" element={<RecordsPage records={records} setRecords={setRecords} />} />
-        <Route path="/appointments" element={<AppointmentsPage appointments={appointments} setAppointments={setAppointments} />} />
+        <Route path="/" element={protectedPage(<LandingPage />)} />
+        <Route path="/login" element={token ? <Navigate to="/dashboard" replace /> : <AuthPage onLogin={handleLogin} onRegister={handleRegister} />} />
+        <Route path="/register" element={token ? <Navigate to="/dashboard" replace /> : <AuthPage onLogin={handleLogin} onRegister={handleRegister} />} />
+        <Route path="/dashboard" element={protectedPage(<DashboardPage user={user} dashboard={dashboard} records={records} />)} />
+        <Route path="/medications" element={protectedPage(<MedicationPage medications={medications} setMedications={setMedications} token={token} />)} />
+        <Route path="/records" element={protectedPage(<RecordsPage records={records} setRecords={setRecords} />)} />
+        <Route path="/appointments" element={protectedPage(<AppointmentsPage appointments={appointments} setAppointments={setAppointments} />)} />
       </Routes>
     </div>
   );
@@ -270,9 +265,12 @@ function LandingPage() {
   );
 }
 
-function AuthPage({ onLogin, onRegister, user }) {
-  const [mode, setMode] = useState('login');
-  const [form, setForm] = useState({ fullName: 'Eleanor Brooks', email: 'elder@example.com', phone: '+1 555 0184', password: 'Password123', role: 'ELDERLY' });
+function AuthPage({ onLogin, onRegister }) {
+  const location = useLocation();
+  const mode = location.pathname === '/register' ? 'register' : 'login';
+  const [form, setForm] = useState({ fullName: '', email: '', phone: '', password: '', role: 'ELDERLY' });
+  const [authError, setAuthError] = useState('');
+  const [isSubmitting, setIsSubmitting] = useState(false);
   const navigate = useNavigate();
 
   const handleChange = (e) => {
@@ -281,31 +279,30 @@ function AuthPage({ onLogin, onRegister, user }) {
 
   const handleSubmit = async (e) => {
     e.preventDefault();
-    if (mode === 'login') {
-      await onLogin({ email: form.email, password: form.password });
-    } else {
-      await onRegister({ ...form });
+    setAuthError('');
+    setIsSubmitting(true);
+    try {
+      if (mode === 'login') {
+        await onLogin({ email: form.email, password: form.password });
+      } else {
+        await onRegister({ ...form });
+      }
+      navigate('/dashboard');
+    } catch (error) {
+      const message = error.response?.status === 409
+        ? 'An account with this email already exists. Try signing in instead.'
+        : error.response?.status === 401 || error.response?.status === 403
+          ? 'Email or password is incorrect.'
+          : error.response?.data?.message
+            || error.response?.data?.detail
+            || (error.code === 'ERR_NETWORK'
+              ? 'Cannot reach the server. Check that the backend is running and try again.'
+              : 'Unable to authenticate. Check your details and try again.');
+      setAuthError(message);
+    } finally {
+      setIsSubmitting(false);
     }
-    navigate('/dashboard');
   };
-
-  if (user) {
-    return (
-      <main className="mx-auto max-w-4xl px-6 py-20">
-        <div className="card text-center">
-          <div className="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-full bg-brand-100 text-brand-700">
-            <UserRound className="h-8 w-8" />
-          </div>
-          <h2 className="text-3xl font-bold text-slate-900">Welcome back, {user.fullName}</h2>
-          <p className="mt-3 text-slate-600">Your account is active and ready to support your care routine.</p>
-          <Link to="/dashboard" className="mt-6 inline-flex items-center gap-2 rounded-full bg-brand-600 px-6 py-3 font-semibold text-white">
-            Open dashboard
-            <ArrowRight className="h-4 w-4" />
-          </Link>
-        </div>
-      </main>
-    );
-  }
 
   return (
     <main className="mx-auto max-w-5xl px-6 py-20">
@@ -325,10 +322,14 @@ function AuthPage({ onLogin, onRegister, user }) {
 
         <div className="card">
           <div className="mb-6 flex rounded-full bg-slate-100 p-1">
-            <button onClick={() => setMode('login')} className={`flex-1 rounded-full px-4 py-2 text-sm font-semibold ${mode === 'login' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500'}`}>
+            <button type="button" onClick={() => { setAuthError(''); navigate('/login'); }} className={`flex-1 rounded-full px-4 py-2 text-sm font-semibold ${mode === 'login' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500'}`}>
               Login
             </button>
-            <button onClick={() => setMode('register')} className={`flex-1 rounded-full px-4 py-2 text-sm font-semibold ${mode === 'register' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500'}`}>
+            <button type="button" onClick={() => {
+              setAuthError('');
+              setForm({ fullName: '', email: '', phone: '', password: '', role: 'ELDERLY' });
+              navigate('/register');
+            }} className={`flex-1 rounded-full px-4 py-2 text-sm font-semibold ${mode === 'register' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500'}`}>
               Register
             </button>
           </div>
@@ -336,18 +337,18 @@ function AuthPage({ onLogin, onRegister, user }) {
             {mode === 'register' && (
               <div>
                 <label className="mb-1 block text-sm font-medium text-slate-700">Full name</label>
-                <input name="fullName" value={form.fullName} onChange={handleChange} className="w-full rounded-xl border border-slate-200 bg-slate-50 p-3 outline-none focus:border-brand-500" />
+                <input required autoComplete="name" name="fullName" value={form.fullName} onChange={handleChange} className="w-full rounded-xl border border-slate-200 bg-slate-50 p-3 outline-none focus:border-brand-500" />
               </div>
             )}
             <div>
               <label className="mb-1 block text-sm font-medium text-slate-700">Email address</label>
-              <input type="email" name="email" value={form.email} onChange={handleChange} className="w-full rounded-xl border border-slate-200 bg-slate-50 p-3 outline-none focus:border-brand-500" />
+              <input required autoComplete="email" type="email" name="email" value={form.email} onChange={handleChange} className="w-full rounded-xl border border-slate-200 bg-slate-50 p-3 outline-none focus:border-brand-500" />
             </div>
             {mode === 'register' && (
               <>
                 <div>
                   <label className="mb-1 block text-sm font-medium text-slate-700">Phone</label>
-                  <input name="phone" value={form.phone} onChange={handleChange} className="w-full rounded-xl border border-slate-200 bg-slate-50 p-3 outline-none focus:border-brand-500" />
+                  <input required autoComplete="tel" name="phone" value={form.phone} onChange={handleChange} className="w-full rounded-xl border border-slate-200 bg-slate-50 p-3 outline-none focus:border-brand-500" />
                 </div>
                 <div>
                   <label className="mb-1 block text-sm font-medium text-slate-700">Role</label>
@@ -361,10 +362,11 @@ function AuthPage({ onLogin, onRegister, user }) {
             )}
             <div>
               <label className="mb-1 block text-sm font-medium text-slate-700">Password</label>
-              <input type="password" name="password" value={form.password} onChange={handleChange} className="w-full rounded-xl border border-slate-200 bg-slate-50 p-3 outline-none focus:border-brand-500" />
+              <input required minLength={8} autoComplete={mode === 'login' ? 'current-password' : 'new-password'} type="password" name="password" value={form.password} onChange={handleChange} className="w-full rounded-xl border border-slate-200 bg-slate-50 p-3 outline-none focus:border-brand-500" />
             </div>
-            <button type="submit" className="w-full rounded-xl bg-brand-600 px-4 py-3 font-semibold text-white transition hover:bg-brand-700">
-              {mode === 'login' ? 'Sign in' : 'Create account'}
+            {authError && <p role="alert" className="rounded-xl bg-red-50 px-4 py-3 text-sm text-red-700">{authError}</p>}
+            <button disabled={isSubmitting} type="submit" className="w-full rounded-xl bg-brand-600 px-4 py-3 font-semibold text-white transition hover:bg-brand-700 disabled:cursor-wait disabled:opacity-70">
+              {isSubmitting ? 'Please wait…' : mode === 'login' ? 'Sign in' : 'Create account'}
             </button>
           </form>
         </div>
@@ -462,7 +464,7 @@ function MedicationPage({ medications, setMedications, token }) {
 
   const saveMedicationStatus = useCallback(async (medication, status) => {
     setStatusError('');
-    if (token && token !== 'demo-token') {
+    if (token) {
       try {
         await axios.patch(
           `${API_BASE}/medications/${medication.id}/status`,

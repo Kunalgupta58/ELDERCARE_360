@@ -1,6 +1,7 @@
 # ELDERCARE 360
 
 A working MVP for the ElderCare 360 platform with a Java Spring Boot backend, Vite React frontend, and local OCR microservice.
+All application pages require authentication; new users can create an account from `/register`.
 
 ## Features
 - Elderly/family/caregiver registration and login with JWT security
@@ -44,6 +45,7 @@ npm run dev -- --host 0.0.0.0
 ```
 
 The frontend is available at http://localhost:5173 and the backend at http://localhost:8080.
+During local development, Vite forwards `/api` requests to the backend. For a separately hosted frontend, set `VITE_API_BASE_URL` to the backend API URL.
 
 ## Demo credentials
 - Email: elder@example.com
