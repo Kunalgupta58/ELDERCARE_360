@@ -7,32 +7,33 @@ import com.eldercare360.backend.model.Medication;
 import com.eldercare360.backend.model.MedicationStatus;
 import com.eldercare360.backend.repository.AppointmentRepository;
 import com.eldercare360.backend.repository.MedicalRecordRepository;
-import com.eldercare360.backend.repository.MedicationRepository;
 import org.springframework.stereotype.Service;
 
 import java.time.Instant;
 import java.util.Comparator;
+import java.util.List;
 
 @Service
 public class DashboardService {
-    private final MedicationRepository medicationRepository;
+    private final MedicationService medicationService;
     private final AppointmentRepository appointmentRepository;
     private final MedicalRecordRepository medicalRecordRepository;
 
-    public DashboardService(MedicationRepository medicationRepository,
+    public DashboardService(MedicationService medicationService,
                            AppointmentRepository appointmentRepository,
                            MedicalRecordRepository medicalRecordRepository) {
-        this.medicationRepository = medicationRepository;
+        this.medicationService = medicationService;
         this.appointmentRepository = appointmentRepository;
         this.medicalRecordRepository = medicalRecordRepository;
     }
 
     public DashboardSummary buildForUser(AppUser user) {
-        long medicationCount = medicationRepository.countByUser(user);
+        List<Medication> medications = medicationService.getAllForUser(user);
+        long medicationCount = medications.size();
         long appointmentCount = appointmentRepository.findByUserOrderByAppointmentTimeAsc(user).size();
         long recordCount = medicalRecordRepository.findByUserOrderByCreatedAtDesc(user).size();
 
-        Medication nextMedication = medicationRepository.findByUserOrderByCreatedAtDesc(user).stream()
+        Medication nextMedication = medications.stream()
                 .filter(m -> m.getStatus() != MedicationStatus.TAKEN)
                 .min(Comparator.comparing(m -> Instant.now()))
                 .orElse(null);
@@ -42,7 +43,7 @@ public class DashboardService {
                 .findFirst()
                 .orElse(null);
 
-        double completionRate = medicationCount == 0 ? 0 : ((double) medicationRepository.findByUserOrderByCreatedAtDesc(user).stream()
+        double completionRate = medicationCount == 0 ? 0 : ((double) medications.stream()
                 .filter(m -> m.getStatus() == MedicationStatus.TAKEN)
                 .count() / (double) medicationCount) * 100.0;
 

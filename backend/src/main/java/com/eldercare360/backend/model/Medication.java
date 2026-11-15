@@ -33,6 +33,9 @@ public class Medication {
     @Column(nullable = false)
     private MedicationStatus status = MedicationStatus.PENDING;
 
+    @Column(name = "status_updated_at", nullable = false)
+    private Instant statusUpdatedAt = Instant.now();
+
     @Column(name = "created_at", nullable = false, updatable = false)
     private Instant createdAt = Instant.now();
 
@@ -52,6 +55,8 @@ public class Medication {
     public void setNotes(String notes) { this.notes = notes; }
     public MedicationStatus getStatus() { return status; }
     public void setStatus(MedicationStatus status) { this.status = status; }
+    public Instant getStatusUpdatedAt() { return statusUpdatedAt; }
+    public void setStatusUpdatedAt(Instant statusUpdatedAt) { this.statusUpdatedAt = statusUpdatedAt; }
     public Instant getCreatedAt() { return createdAt; }
     public void setCreatedAt(Instant createdAt) { this.createdAt = createdAt; }
 }

@@ -37,6 +37,7 @@ public class MedicationController {
 
     @PatchMapping("/medications/{id}/status")
     public ResponseEntity<Medication> updateStatus(@PathVariable Long id, @RequestParam String status) {
-        return ResponseEntity.ok(medicationService.updateStatus(id, MedicationStatus.valueOf(status.toUpperCase())));
+        AppUser user = userService.getCurrentUser();
+        return ResponseEntity.ok(medicationService.updateStatus(id, user, MedicationStatus.valueOf(status.toUpperCase())));
     }
 }

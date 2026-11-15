@@ -4,7 +4,7 @@ A working MVP for the ElderCare 360 platform with a Java Spring Boot backend, Vi
 
 ## Features
 - Elderly/family/caregiver registration and login with JWT security
-- Medication dashboard and reminder planning
+- Medication dashboard with spoken scheduled reminders and optional spoken dose confirmation
 - Medical record vault with local file storage
 - OCR integration endpoint for prescription processing
 - Appointment scheduler
@@ -53,3 +53,4 @@ The frontend is available at http://localhost:5173 and the backend at http://loc
 - The default backend profile uses H2 for local development.
 - The production profile uses PostgreSQL when `SPRING_PROFILES_ACTIVE=postgres` is enabled.
 - The OCR microservice attempts local OCR processing; if a Tesseract binary is not installed in the current environment, it falls back to structured text extraction without inventing medical details.
+- Voice reminders use the browser's speech synthesis and speech recognition APIs. Enable them from the Medication page; keep that page open, and allow microphone access for spoken confirmation. Browser support is required. Daily medication statuses reset to pending the next calendar day when records are loaded; other frequencies remain manual because their weekdays are not configured. A dose remains pending unless a clear voice or button confirmation is saved.

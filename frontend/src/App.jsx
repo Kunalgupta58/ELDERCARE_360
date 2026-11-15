@@ -1,16 +1,15 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { BrowserRouter, Link, NavLink, Route, Routes, useNavigate } from 'react-router-dom';
 import {
   Activity,
   ArrowRight,
   BellRing,
   CalendarDays,
-  Clock3,
   FileText,
   HeartPulse,
-  Home,
   Lock,
   LogOut,
+  Mic,
   Pill,
   ShieldCheck,
   Sparkles,
@@ -94,7 +93,6 @@ function AppLayout() {
 
   useEffect(() => {
     if (!token) {
-      setUser(fallbackUser);
       return;
     }
 
@@ -198,8 +196,8 @@ function AppLayout() {
       <Routes>
         <Route path="/" element={<LandingPage />} />
         <Route path="/login" element={<AuthPage onLogin={handleLogin} onRegister={handleRegister} user={user} />} />
-        <Route path="/dashboard" element={<DashboardPage user={user} dashboard={dashboard} medications={medications} appointments={appointments} records={records} />} />
-        <Route path="/medications" element={<MedicationPage medications={medications} setMedications={setMedications} />} />
+        <Route path="/dashboard" element={<DashboardPage user={user} dashboard={dashboard} records={records} />} />
+        <Route path="/medications" element={<MedicationPage medications={medications} setMedications={setMedications} token={token} />} />
         <Route path="/records" element={<RecordsPage records={records} setRecords={setRecords} />} />
         <Route path="/appointments" element={<AppointmentsPage appointments={appointments} setAppointments={setAppointments} />} />
       </Routes>
@@ -375,7 +373,7 @@ function AuthPage({ onLogin, onRegister, user }) {
   );
 }
 
-function DashboardPage({ user, dashboard, medications, appointments, records }) {
+function DashboardPage({ user, dashboard, records }) {
   const summary = useMemo(() => [
     { label: 'Medications', value: dashboard.medicationCount, icon: <Pill className="h-5 w-5" /> },
     { label: 'Appointments', value: dashboard.appointmentCount, icon: <CalendarDays className="h-5 w-5" /> },
@@ -445,8 +443,144 @@ function DashboardPage({ user, dashboard, medications, appointments, records }) 
   );
 }
 
-function MedicationPage({ medications, setMedications }) {
+function MedicationPage({ medications, setMedications, token }) {
   const [form, setForm] = useState({ name: '', dosage: '', scheduleTime: '', frequency: '', notes: '' });
+  const [voiceEnabled, setVoiceEnabled] = useState(false);
+  const [voiceStatus, setVoiceStatus] = useState('Voice reminders are off.');
+  const [isListening, setIsListening] = useState(false);
+  const [statusError, setStatusError] = useState('');
+  const announcedReminders = useRef(new Set());
+
+  const speakMessage = useCallback((message) => {
+    if (!('speechSynthesis' in window) || typeof SpeechSynthesisUtterance === 'undefined') {
+      setVoiceStatus('Spoken alerts are not supported in this browser.');
+      return;
+    }
+    window.speechSynthesis.cancel();
+    window.speechSynthesis.speak(new SpeechSynthesisUtterance(message));
+  }, []);
+
+  const saveMedicationStatus = useCallback(async (medication, status) => {
+    setStatusError('');
+    if (token && token !== 'demo-token') {
+      try {
+        await axios.patch(
+          `${API_BASE}/medications/${medication.id}/status`,
+          null,
+          {
+            params: { status },
+            headers: { Authorization: `Bearer ${stripBearer(token)}` },
+          },
+        );
+      } catch {
+        setStatusError('Could not save this confirmation. The dose is still marked pending.');
+        setVoiceStatus(`${medication.name} confirmation could not be saved; the dose remains pending.`);
+        return false;
+      }
+    }
+
+    setMedications((current) => current.map((item) => (
+      item.id === medication.id ? { ...item, status } : item
+    )));
+    setVoiceStatus(`${medication.name} marked as taken.`);
+    return true;
+  }, [setMedications, token]);
+
+  const askForVoiceConfirmation = useCallback((medication) => {
+    const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!Recognition) {
+      setVoiceStatus('Voice recognition is not supported in this browser. Use the Mark taken button to confirm.');
+      return;
+    }
+
+    const recognition = new Recognition();
+    recognition.lang = 'en-US';
+    recognition.continuous = false;
+    recognition.interimResults = false;
+    let receivedResult = false;
+    setIsListening(true);
+    setVoiceStatus(`Listening for confirmation for ${medication.name}...`);
+
+    recognition.onresult = async (event) => {
+      receivedResult = true;
+      const transcript = event.results?.[0]?.[0]?.transcript?.trim().toLowerCase() || '';
+      const saysNotTaken = /\b(not|no|haven't|have not|didn't|did not|yet)\b/.test(transcript);
+      const confirmsTaken = !saysNotTaken && /\b(yes|yeah|yep|taken|took|done)\b/.test(transcript);
+
+      if (confirmsTaken) {
+        const saved = await saveMedicationStatus(medication, 'TAKEN');
+        if (saved) {
+          speakMessage(`Thank you. ${medication.name} is marked as taken.`);
+        } else {
+          speakMessage(`I could not save the confirmation. ${medication.name} remains pending.`);
+        }
+      } else {
+        setVoiceStatus(`No clear confirmation heard. ${medication.name} remains pending.`);
+        speakMessage(`I did not hear a clear confirmation. ${medication.name} remains pending.`);
+      }
+    };
+
+    recognition.onerror = () => {
+      setVoiceStatus(`Could not hear a confirmation. ${medication.name} remains pending.`);
+    };
+    recognition.onend = () => {
+      setIsListening(false);
+      if (!receivedResult) {
+        setVoiceStatus(`No confirmation heard. ${medication.name} remains pending.`);
+      }
+    };
+
+    try {
+      recognition.start();
+    } catch {
+      setIsListening(false);
+      setVoiceStatus(`Could not start voice recognition. ${medication.name} remains pending.`);
+    }
+  }, [saveMedicationStatus, speakMessage]);
+
+  useEffect(() => {
+    if (!voiceEnabled) return undefined;
+
+    const checkDueMedications = () => {
+      const now = new Date();
+      const hour = now.getHours() % 12 || 12;
+      const minute = String(now.getMinutes()).padStart(2, '0');
+      const currentTime = `${String(hour).padStart(2, '0')}:${minute}`;
+      const meridiem = now.getHours() >= 12 ? 'PM' : 'AM';
+      const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+
+      const dueMedication = medications.find((medication) => {
+        const match = medication.scheduleTime?.trim().match(/^(\d{1,2}):(\d{2})\s*(AM|PM)?$/i);
+        if (!match) return false;
+        if (!/daily|every day/i.test(medication.frequency || '')) return false;
+        const scheduledTime = `${String(Number(match[1])).padStart(2, '0')}:${match[2]}`;
+        const scheduledMeridiem = match[3]?.toUpperCase();
+        const reminderKey = `${today}:${medication.id}`;
+        return medication.status === 'PENDING'
+          && scheduledTime === currentTime
+          && (!scheduledMeridiem || scheduledMeridiem === meridiem)
+          && !announcedReminders.current.has(reminderKey);
+      });
+
+      if (dueMedication) {
+        announcedReminders.current.add(`${today}:${dueMedication.id}`);
+        setVoiceStatus(`Reminder for ${dueMedication.name}. Listening for confirmation...`);
+        window.speechSynthesis?.cancel();
+        const utterance = new SpeechSynthesisUtterance(
+          `It is time to take ${dueMedication.name}, ${dueMedication.dosage}. Say taken after you have taken it.`,
+        );
+        utterance.onend = () => askForVoiceConfirmation(dueMedication);
+        window.speechSynthesis?.speak(utterance);
+      }
+    };
+
+    checkDueMedications();
+    const intervalId = window.setInterval(checkDueMedications, 15000);
+    return () => {
+      window.clearInterval(intervalId);
+      window.speechSynthesis?.cancel();
+    };
+  }, [askForVoiceConfirmation, medications, voiceEnabled]);
 
   const handleSubmit = (e) => {
     e.preventDefault();
@@ -470,7 +604,31 @@ function MedicationPage({ medications, setMedications }) {
         </div>
 
         <div className="card">
-          <h2 className="text-2xl font-bold text-slate-900">Medication schedule</h2>
+          <div className="flex flex-wrap items-start justify-between gap-4">
+            <div>
+              <h2 className="text-2xl font-bold text-slate-900">Medication schedule</h2>
+              <p className="mt-2 text-sm text-slate-600" aria-live="polite">{voiceStatus}</p>
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                if (!('speechSynthesis' in window) || typeof SpeechSynthesisUtterance === 'undefined') {
+                  setVoiceStatus('Spoken alerts are not supported in this browser.');
+                  return;
+                }
+                setVoiceEnabled((enabled) => !enabled);
+                setVoiceStatus(voiceEnabled ? 'Voice reminders are off.' : 'Voice reminders are on for daily medications on this page.');
+                if (voiceEnabled) window.speechSynthesis.cancel();
+              }}
+              className="inline-flex items-center gap-2 rounded-xl border border-brand-200 bg-brand-50 px-4 py-2 text-sm font-semibold text-brand-700"
+              aria-pressed={voiceEnabled}
+            >
+              <BellRing className="h-4 w-4" />
+              {voiceEnabled ? 'Turn off voice reminders' : 'Enable voice reminders'}
+            </button>
+          </div>
+          {statusError && <p role="alert" className="mt-3 text-sm font-medium text-red-600">{statusError}</p>}
+          {isListening && <p className="mt-3 inline-flex items-center gap-2 text-sm font-medium text-brand-700"><Mic className="h-4 w-4" />Listening for “taken”</p>}
           <div className="mt-6 space-y-4">
             {medications.map((medication) => (
               <div key={medication.id} className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
@@ -485,6 +643,15 @@ function MedicationPage({ medications, setMedications }) {
                 </div>
                 <div className="mt-3 text-sm text-slate-600">{medication.frequency}</div>
                 {medication.notes && <div className="mt-2 text-sm text-slate-500">{medication.notes}</div>}
+                {medication.status !== 'TAKEN' && (
+                  <button
+                    type="button"
+                    onClick={() => saveMedicationStatus(medication, 'TAKEN')}
+                    className="mt-4 rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-emerald-700"
+                  >
+                    Mark taken
+                  </button>
+                )}
               </div>
             ))}
           </div>
